@@ -135,9 +135,9 @@ OpenJsCad.Viewer.prototype = {
   setCsg: function(csg) {
     if(0&&csg.length) {                            // preparing multiple CSG's (not union-ed), not yet working
        for(var i=0; i<csg.length; i++)
-          this.meshes.concat(OpenJsCad.Viewer.csgToMeshes(csg[i]));
+          this.meshes.concat(this.csgToMeshes(csg[i]));
     } else {
-       this.meshes = OpenJsCad.Viewer.csgToMeshes(csg);
+       this.meshes = this.csgToMeshes(csg);
     }
     this.onDraw();    
   },
@@ -302,78 +302,233 @@ OpenJsCad.Viewer.prototype = {
       gl.disable(gl.BLEND);
       if (this.lineOverlay) gl.enable(gl.DEPTH_TEST);
     }
+  }, 
+
+  // Convert from CSG solid to an array of GL.Mesh objects
+  // limiting the number of vertices per mesh to less than 2^16
+  csgToMeshes: function(initial_csg) {
+    var csg = initial_csg.canonicalized();
+    var mesh = new GL.Mesh({ normals: true, colors: true });
+    var meshes = [ mesh ];
+    var vertexTag2Index = {};
+    var vertices = [];
+    var colors = [];
+    var triangles = [];
+    // set to true if we want to use interpolated vertex normals
+    // this creates nice round spheres but does not represent the shape of
+    // the actual model
+    var smoothlighting = false;
+    var polygons = csg.toPolygons();
+    var numpolygons = polygons.length;
+    for(var j = 0; j < numpolygons; j++) {
+      var polygon = polygons[j];
+      var color = [1,.4,1,1];      // -- default color
+
+      if(polygon.shared && polygon.shared.color) {
+        color = polygon.shared.color;
+      }
+      if(polygon.color) {
+        color = polygon.color;
+      }
+
+    if (color.length < 4)
+      color.push(1.); //opaque
+
+      var indices = polygon.vertices.map(function(vertex) {
+        var vertextag = vertex.getTag();
+        var vertexindex;
+        if(smoothlighting && (vertextag in vertexTag2Index)) {
+          vertexindex = vertexTag2Index[vertextag];
+        } else {
+          vertexindex = vertices.length;
+          vertexTag2Index[vertextag] = vertexindex;
+          vertices.push([vertex.pos.x, vertex.pos.y, vertex.pos.z]);
+          colors.push(color);
+        }
+        return vertexindex;
+      });
+      for (var i = 2; i < indices.length; i++) {
+        triangles.push([indices[0], indices[i - 1], indices[i]]);
+      }
+      // if too many vertices, start a new mesh;
+      if (vertices.length > 65000) {
+        // finalize the old mesh	
+        mesh.triangles = triangles;
+        mesh.vertices = vertices;
+        mesh.colors = colors;
+        mesh.computeWireframe();
+        mesh.computeNormals();
+        // start a new mesh
+        mesh = new GL.Mesh({ normals: true, colors: true });
+        triangles = [];
+        colors = [];
+        vertices = [];
+        meshes.push(mesh);	
+      }
+    }
+    // finalize last mesh
+    mesh.triangles = triangles;
+    mesh.vertices = vertices;
+    mesh.colors = colors;
+    mesh.computeWireframe();
+    mesh.computeNormals();
+    return meshes;
   }
 };
 
-// Convert from CSG solid to an array of GL.Mesh objects
-// limiting the number of vertices per mesh to less than 2^16
-OpenJsCad.Viewer.csgToMeshes = function(initial_csg) {
-  var csg = initial_csg.canonicalized();
-  var mesh = new GL.Mesh({ normals: true, colors: true });
-  var meshes = [ mesh ];
-  var vertexTag2Index = {};
-  var vertices = [];
-  var colors = [];
-  var triangles = [];
-  // set to true if we want to use interpolated vertex normals
-  // this creates nice round spheres but does not represent the shape of
-  // the actual model
-  var smoothlighting = false;
-  var polygons = csg.toPolygons();
-  var numpolygons = polygons.length;
-  for(var j = 0; j < numpolygons; j++) {
-    var polygon = polygons[j];
-    var color = [1,.4,1,1];      // -- default color
+/**
+ * Just another Viewer implementation based upon JSC3D toolkit.
+ */
+OpenJsCad.JscViewer = function(containerelement, width, height, initialdepth) {
+  // Draw axes flag:
+  this.drawAxes = true;
+  // Draw triangle lines:
+  this.drawLines = false;
+  // Set to true so lines don't use the depth buffer
+  this.lineOverlay = false;
 
-    if(polygon.shared && polygon.shared.color) {
-      color = polygon.shared.color;
+  var canvas = document.createElement('canvas');
+  canvas.width  = width;
+  canvas.height = height;
+  containerelement.appendChild(canvas);
+
+  this.jscViewer = new JSC3D.Viewer(canvas, {
+    RenderMode:       'flat', 
+    Renderer:         'webgl', 
+    BackgroundColor1: '#FFFFFF', 
+    BackgroundColor2: '#FFFFFF', 
+    ModelColor:       '#FF66FF'
+  });
+  this.jscViewer.init();
+
+  this.clear();
+};
+
+OpenJsCad.JscViewer.prototype = {
+
+  setCsg: function(csg) {
+    function makeJscScene(jscViewer, jscMeshes) {
+      var jscScene = new JSC3D.Scene;
+      for(var i=0; i<jscMeshes.length; i++)
+        jscScene.addChild(jscMeshes[i]);
+      jscViewer.replaceScene(jscScene);
     }
-    if(polygon.color) {
-      color = polygon.color;
+
+    // save current rotation angles
+    var angles = this.getAngles();
+
+    if(0&&csg.length) {                            // preparing multiple CSG's (not union-ed), not yet working
+       var jscMeshes = [];
+       for(var i=0; i<csg.length; i++)
+         jscMeshes.concat(this.csgToMeshes(csg[i]));
+       makeJscScene(this.jscViewer, jscMeshes);
+    } else {
+       makeJscScene(this.jscViewer, this.csgToMeshes(csg));
     }
 
-	if (color.length < 4)
-		color.push(1.); //opaque
+    // restore rotation angles
+    this.jscViewer.rotate(angles[0], angles[1], angles[2]);
 
-    var indices = polygon.vertices.map(function(vertex) {
-      var vertextag = vertex.getTag();
-      var vertexindex;
-      if(smoothlighting && (vertextag in vertexTag2Index)) {
-        vertexindex = vertexTag2Index[vertextag];
-      } else {
-        vertexindex = vertices.length;
-        vertexTag2Index[vertextag] = vertexindex;
-        vertices.push([vertex.pos.x, vertex.pos.y, vertex.pos.z]);
-        colors.push(color);
+    this.onDraw();
+  },
+
+  clear: function() {
+    this.jscViewer.replaceScene(new JSC3D.Scene);
+    this.onDraw();    
+  },
+
+  supported: function() {
+    return !!this.jscViewer;
+  },
+
+  ZOOM_MAX: 1000,
+  ZOOM_MIN: 10,
+  onZoomChanged: null,
+  plate: true,                   // render plate
+
+  setZoom: function(coeff) { //0...1
+    this.onDraw();
+  },
+
+  getZoom: function() {
+    var coeff = (this.viewpointZ-this.ZOOM_MIN) / (this.ZOOM_MAX - this.ZOOM_MIN);
+    return coeff;
+  },
+
+  getAngles: function() {
+    var rotMatrix = this.jscViewer.rotMatrix;
+    var angles = [
+      Math.atan2(rotMatrix.m21, rotMatrix.m22) * 180 / Math.PI, 
+      Math.asin(-rotMatrix.m20) * 180 / Math.PI, 
+      Math.atan2(rotMatrix.m10, rotMatrix.m00) * 180 / Math.PI
+    ];
+
+    if(angles[0] < 0)
+      angles[0] += 360;
+    if(angles[1] < 0)
+      angles[1] += 360;
+    if(angles[2] < 0)
+      angles[2] += 360;
+
+    return angles;
+  }, 
+  
+  onDraw: function(e) {
+    this.jscViewer.update();
+  }, 
+
+  // Convert from CSG solid to an array of GL.Mesh objects
+  // limiting the number of vertices per mesh to less than 2^16
+  // @private
+  csgToMeshes: function(initial_csg) {
+    var csg = initial_csg.canonicalized();
+    var meshes = {};
+    // set to true if we want to use interpolated vertex normals
+    // this creates nice round spheres but does not represent the shape of
+    // the actual model
+    var smoothlighting = false;
+    var polygons = csg.toPolygons();
+    var numpolygons = polygons.length;
+    for(var j = 0; j < numpolygons; j++) {
+      var polygon = polygons[j];
+      var color = [1,.4,1,1];      // -- default color
+
+      if(polygon.shared && polygon.shared.color) {
+        color = polygon.shared.color;
       }
-      return vertexindex;
-    });
-    for (var i = 2; i < indices.length; i++) {
-      triangles.push([indices[0], indices[i - 1], indices[i]]);
+      if(polygon.color) {
+        color = polygon.color;
+      }
+
+      if (color.length < 4)
+        color.push(1.); //opaque
+
+      var vertices = polygon.vertices;
+
+      var colortag = color.toString();
+      var jscMesh = meshes[colortag];
+      // create another mesh to hold faces of the new color
+      if(!jscMesh) {
+        var jscMaterial = new JSC3D.Material(colortag, 0, (255 * color[0]) << 16 | (255 * color[1]) << 8 | (255 * color[2]) << 0, 1 - color[3], true);
+        jscMesh = new JSC3D.Mesh(colortag, true, jscMaterial, null, 0, false, false, [], []);
+        meshes[colortag] = jscMesh;
+      }
+
+      for(var i=0; i<vertices.length; i++) {
+        var vertex = vertices[i];
+        jscMesh.indexBuffer.push(jscMesh.vertexBuffer.length / 3);
+        jscMesh.vertexBuffer.push(vertex.pos.x, vertex.pos.y, vertex.pos.z);
+      }
+      jscMesh.indexBuffer.push(-1);
     }
-    // if too many vertices, start a new mesh;
-    if (vertices.length > 65000) {
-      // finalize the old mesh	
-      mesh.triangles = triangles;
-      mesh.vertices = vertices;
-      mesh.colors = colors;
-      mesh.computeWireframe();
-      mesh.computeNormals();
-      // start a new mesh
-      mesh = new GL.Mesh({ normals: true, colors: true });
-      triangles = [];
-      colors = [];
-      vertices = [];
-      meshes.push(mesh);	
+
+    var ret = [];
+    for(var tag in meshes) {
+      ret.push(meshes[tag]);
     }
+    return ret;
   }
-  // finalize last mesh
-  mesh.triangles = triangles;
-  mesh.vertices = vertices;
-  mesh.colors = colors;
-  mesh.computeWireframe();
-  mesh.computeNormals();
-  return meshes;
+
 };
 
 // this is a bit of a hack; doesn't properly supports urls that start with '/'
@@ -822,7 +977,11 @@ OpenJsCad.Processor.prototype = {
     try {
       //this.viewer = new OpenJsCad.Viewer(this.viewerdiv, this.viewerwidth, this.viewerheight, this.initialViewerDistance);
       //this.viewer = new OpenJsCad.Viewer(this.viewerdiv, viewerdiv.offsetWidth, viewer.offsetHeight, this.initialViewerDistance);
-      this.viewer = new OpenJsCad.Viewer(this.viewerdiv, screen.width, screen.height, this.initialViewerDistance);
+      //this.viewer = new OpenJsCad.Viewer(this.viewerdiv, screen.width, screen.height, this.initialViewerDistance);
+      /**
+       * By Humu 2014/1/23
+       */
+      this.viewer = new OpenJsCad.JscViewer(this.viewerdiv, screen.width, screen.height, this.initialViewerDistance);
     } catch(e) {
       //      this.viewer = null;
       this.viewerdiv.innerHTML = "<b><br><br>Error: " + e.toString() + "</b><br><br>OpenJsCad currently requires Google Chrome or Firefox with WebGL enabled";
